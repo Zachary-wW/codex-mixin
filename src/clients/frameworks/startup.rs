@@ -101,6 +101,10 @@ pub(super) fn remove(manifest: &Path) -> anyhow::Result<()> {
     let Some(record) = engine::read_record(&record_path)? else {
         return Ok(());
     };
+    let id = record["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .context("invalid startup journal agent id")?;
     let mut changes = Vec::new();
     for entry in entries(&record)? {
         let (path, block) = entry_fields(entry)?;
@@ -110,10 +114,7 @@ pub(super) fn remove(manifest: &Path) -> anyhow::Result<()> {
         }
         let current = current
             .context("managed startup profile disappeared; reconcile it before disconnecting")?;
-        anyhow::ensure!(
-            current.matches(block).count() == 1,
-            "managed startup entry was edited; refusing to overwrite it"
-        );
+        let matched = matched_removable_block(&current, block, id)?;
         let restored = if current
             == entry["after"]
                 .as_str()
@@ -122,14 +123,19 @@ pub(super) fn remove(manifest: &Path) -> anyhow::Result<()> {
             entry["before"].as_str().map(str::to_owned)
         } else {
             let (prefix, suffix) = current
-                .split_once(block)
+                .split_once(&matched)
                 .context("startup entry disappeared")?;
             let separator = if !prefix.is_empty() && !prefix.ends_with('\n') && !suffix.is_empty() {
                 "\n"
             } else {
                 ""
             };
-            Some(current.replacen(block, separator, 1))
+            let next = current.replacen(&matched, separator, 1);
+            if next.is_empty() && entry["before"].is_null() {
+                None
+            } else {
+                Some(next)
+            }
         };
         changes.push((path, restored));
     }
@@ -138,6 +144,37 @@ pub(super) fn remove(manifest: &Path) -> anyhow::Result<()> {
         save_profile(&path, restored.as_deref())?;
     }
     engine::remove_record(&record_path)
+}
+
+fn matched_removable_block(current: &str, block: &str, id: &str) -> anyhow::Result<String> {
+    if current.matches(block).count() == 1 {
+        return Ok(block.to_owned());
+    }
+    let start = format!("# >>> codex-mixin managed {id} >>>");
+    let end = format!("# <<< codex-mixin managed {id} <<<");
+    let start_count = current.matches(&start).count();
+    let end_count = current.matches(&end).count();
+    if start_count == 1 && end_count == 1 {
+        // External installers (for example the agy CLI installer stripping
+        // `alias agy=...` lines) can leave an empty managed fence behind.
+        // Allow disconnecting an empty owned marker pair while still refusing
+        // non-empty user edits inside the managed block.
+        for candidate in [
+            format!("\n{start}\n{end}\n"),
+            format!("\r\n{start}\r\n{end}\r\n"),
+            format!("{start}\n{end}\n"),
+            format!("{start}\r\n{end}\r\n"),
+            format!("\n{start}\n{end}"),
+            format!("\r\n{start}\r\n{end}"),
+            format!("{start}\n{end}"),
+            format!("{start}\r\n{end}"),
+        ] {
+            if current.matches(&candidate).count() == 1 {
+                return Ok(candidate);
+            }
+        }
+    }
+    anyhow::bail!("managed startup entry was edited; refusing to overwrite it");
 }
 
 fn entries(record: &Value) -> anyhow::Result<&Vec<Value>> {
