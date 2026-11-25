@@ -154,9 +154,7 @@ fn removable_block_range(
     id: &str,
 ) -> anyhow::Result<std::ops::Range<usize>> {
     if current.matches(block).count() == 1 {
-        let start = current
-            .find(block)
-            .context("startup entry disappeared")?;
+        let start = current.find(block).context("startup entry disappeared")?;
         return Ok(start..start + block.len());
     }
     if let Some(range) = empty_fence_range(current, id) {
@@ -194,7 +192,11 @@ fn empty_fence_range(current: &str, id: &str) -> Option<std::ops::Range<usize>> 
     if index > 0 && lines[index - 1].2.is_empty() {
         start_offset = lines[index - 1].0;
     } else if start_offset > 0 && current.as_bytes()[start_offset - 1] == b'\n' {
-        start_offset -= 1;
+        start_offset = if start_offset >= 2 && current.as_bytes()[start_offset - 2] == b'\r' {
+            start_offset - 2
+        } else {
+            start_offset - 1
+        };
     }
     Some(start_offset..*end_offset)
 }
